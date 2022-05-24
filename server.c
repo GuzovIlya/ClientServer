@@ -6,82 +6,125 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <fcntl.h>
 #include <string.h>
-#include <signal.h>
-#include "erproc.h"
+#include <pthread.h>
+#include <time.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <sys/time.h>
 
-void signal_handler(int sig){
-	switch(sig){
-		case SIGHUP:
-			printf(">Server --- Hang up signal catched\n");
-			exit(EXIT_SUCCESS);
-		case SIGTERM:
-			printf(">Server --- Client pid %d send SIGTERM signal\n", getppid());
-			exit(EXIT_SUCCESS);
-	}
+#define BUF_SIZE    30000
+#define PORT        5050
+#define MAX_CLIENTS 100000
+
+static int count_client = 0;
+static bool send_start = false;
+
+typedef struct threadArgs{
+	int fd;
+	char *buf;
+	ssize_t nread;
+} threadArgs_t;
+
+struct timeval tv1, tv2, dtv;
+
+struct timezone tz;
+
+static void time_start()
+{ 
+	gettimeofday(&tv1, &tz); 
 }
 
-int main(int argc, char *argv[], char *envp[]){
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(STDERR_FILENO);
-
-	int server = Socket(AF_INET, SOCK_STREAM, 0); // TCP/IP
-	struct sockaddr_in adr = {0};
-	adr.sin_family = AF_INET; //IPv4
-	adr.sin_port = htons(12345);
-	Bind(server, (struct sockaddr *) &adr, sizeof adr);
-
-	struct sigaction sa;
-	sa.sa_handler = signal_handler;
-	sigaction(SIGTERM, &sa, 0);
-	sigaction(SIGHUP, &sa, 0);
-	while(1){ //While signals not catched
-		Listen(server, 3); //max 3 connection
-		socklen_t adrlen = sizeof adr;
-		int fd = Accept(server, (struct sockaddr *) &adr, &adrlen);
-		ssize_t nread;
-		char buf[256];
-		nread = read(fd, buf, 256); //read from socket to buf
-		if(nread == -1){
-			perror(">Server ---  Read failed");
-			exit(EXIT_FAILURE);
-		}
-		if(nread == 0){
-			printf(">Server --- EOF occured\n");
-		}
-
-		char* dir = getcwd(NULL,0); //get current dir
-		if(dir == NULL){
-			perror(">Client --- Getcwd failed");
-			exit(EXIT_FAILURE);
-		}
-        	char* outname = "/output.txt";
-		char* output = calloc(strlen(dir) + strlen(outname), sizeof (char));
-		strcat(output, dir);
-		free(dir);
-		strcat(output, outname); //'dir + /output.txt' for open()
-		remove(output); //remove output.txt
-
-	        int dfile = open(output, O_RDWR|O_CREAT, S_IREAD); //create output.txt
-		free(output);
-		if(dfile == -1){
-			perror(">Server --- Open failed");
-			exit(EXIT_FAILURE);
-		}
-		ssize_t nwrite = write(dfile, buf, nread); //write from buf to file
-		if(nwrite == -1){
-			perror(">Server --- Write failed");
-			exit(EXIT_FAILURE);
-		}
-		int nclose = close(dfile); //close file
-		if(nclose == -1){
-			perror(">Server --- Close failed");
-			exit(EXIT_FAILURE);
-		}
-		close(fd); //close connection
+static long time_stop() 
+{ 
+	gettimeofday(&tv2, &tz);
+	dtv.tv_sec= tv2.tv_sec - tv1.tv_sec;
+  	dtv.tv_usec=tv2.tv_usec - tv1.tv_usec;
+  	if(dtv.tv_usec < 0){ 
+		dtv.tv_sec--; 
+		dtv.tv_usec += 1000000; 
 	}
-	close(server); //close socket
+  	return dtv.tv_sec*1000+dtv.tv_usec/1000;
+}
+/*
+static void* client_thread(void *args)
+{
+	while(!send_start)
+		continue;
+	threadArgs_t *arg = (threadArgs_t*) args;
+	write(arg->fd, arg->buf, arg->nread);
+	
+	pthread_exit(0);
+}
+*/
+static int init_server(struct sockaddr_in addr)
+{
+	int server = socket(AF_INET, SOCK_STREAM, 0); // TCP/IP
+	addr.sin_family = AF_INET; //IPv4
+	addr.sin_port = htons(PORT);
+	bind(server, (struct sockaddr *) &addr, sizeof addr);
+	return server;
+}
+
+int main()
+{
+	int fd_clients[MAX_CLIENTS];
+	int socket_server;
+//	pthread_t threads[MAX_CLIENTS];
+	threadArgs_t args[MAX_CLIENTS];
+	struct sockaddr_in adr = {0};
+	socklen_t adrlen = sizeof adr;
+	socket_server = init_server(adr);
+	
+	while(1)
+	{
+		listen(socket_server, MAX_CLIENTS);
+		int fd = accept(socket_server, (struct sockaddr *) &adr, &adrlen);
+		if(!fd)
+		{
+			perror("Server - Accept error");
+			break;
+		}
+		time_start();
+		fd_clients[count_client] = fd;
+		char buf[BUF_SIZE];
+		ssize_t nread = read(fd, buf, BUF_SIZE); //read from socket to buf
+		args[count_client].fd = fd;
+		
+		for(int i = 0; i <= count_client; i++)
+		{
+			args[i].buf = buf;
+			args[i].nread = nread;	
+		}
+/*
+		for(int i = 0; i < count_client; i++)
+		{
+			pthread_create(&threads[i], NULL, client_thread, (void*) &args[i]);
+		}
+*/
+		for(int i = 0; i < count_client; i++)
+		{
+			write(args[i].fd, args[i].buf, args[i].nread);
+		}
+/*		send_start = true;
+		for(int i = 0; i < count_client; i++)
+		{
+			pthread_join(threads[i], NULL);
+		}
+		send_start = false;
+*/		int long diff_time = time_stop();
+		
+		char buf_time[32];
+		sprintf(buf_time, "%ld\n", diff_time);
+		write(fd_clients[count_client], buf_time, strlen(buf_time));
+		count_client++;
+	}
+	
+	for(int i = 0; i <= count_client; i++)
+	{
+		close(fd_clients[i]); //close connection
+	}
+	
+	close(socket_server); //close socket
 	return EXIT_SUCCESS;
 }
